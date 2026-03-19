@@ -5,7 +5,7 @@
 - **Nombre:** [Franco Furfuri]
 - **Legajo:** [64180]
 - **Email:** [f.furfuri@alumno.um.edu.ar]
-- **GitHub:** [@tu-usuario](https://github.com/Pancho26)
+- **GitHub:** [@Pancho26](https://github.com/Pancho26)
 
 ## Estructura
 
