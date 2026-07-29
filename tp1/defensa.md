@@ -1,0 +1,24 @@
+leer_fds usa os.readlink (no open) para reportar el destino del FD sin abrir sockets/pipes. Doble try/except cubre dos race conditions distintas: proceso murió (externo) y FD cerrado (interno).
+
+leer_maps agrupa segmentos de memoria por categoría (heap, stack, text, lib, anon) leyendo /proc/<pid>/maps. Las direcciones vienen en hexadecimal (base 16). El nombre del archivo puede tener espacios, por eso uso split(maxsplit=5) — el patrón "no partas de más" que evita destrozar el último campo.
+
+En Linux, un thread es un LWP (Light-Weight Process) y se expone en /proc/<pid>/task/<tid>/ con la misma estructura que un proceso. El TID de un thread coincide con el PID del proceso principal para el "main thread". Esto permite reutilizar el mismo parseo para procesos y threads.
+Un socket es un canal de comunicación entre procesos (Unix sockets locales o TCP/UDP en red). En /proc/<pid>/fd/, un socket abierto se expone como symlink a socket:[N] donde N es su inode. leer_fds lo detecta por prefijo y solo reporta que existe — nunca lo abre, para no interferir con la comunicación real.
+
+Un symlink es un tipo especial de archivo cuyo contenido es una ruta a otro archivo. El kernel sigue el symlink automáticamente cuando se lo abre, pero se puede consultar su destino sin seguirlo usando os.readlink(). En /proc/<pid>/fd/, cada FD abierto se expone como un symlink a su recurso real (archivo, socket, pipe, terminal); leer_fds usa readlink para reportar el destino sin efectos colaterales (no queremos leer del socket, solo reportar que existe).
+
+Un file descriptor (FD) es un entero pequeño que el kernel asigna a un proceso como referencia a un recurso abierto (archivo, socket, pipe, terminal, dispositivo). Los FDs 0/1/2 siempre son stdin/stdout/stderr. Los FDs están en /proc/<pid>/fd/ como symlinks que apuntan al destino real: os.readlink() los resuelve sin abrir el destino. Es una aplicación del principio Unix "todo es un archivo": el mismo modelo (leer/escribir por número) sirve para cualquier recurso del sistema.
+Heap: zona de memoria virtual donde un proceso guarda objetos creados dinámicamente durante la ejecución (listas, dicts, strings en Python; malloc() en C). Se expone en /proc/<pid>/maps con la etiqueta [heap]. Crece según necesidad. En Python, el garbage collector libera automáticamente los objetos que ya no se referencian.
+
+Stack: zona de memoria donde se guardan las variables locales de las funciones activas. Se maneja automáticamente al entrar y salir de funciones. Tamaño limitado (~8 MB por defecto). Se expone como [stack] en /proc/<pid>/maps.
+Stack overflow ≠ Out of memory. Stack overflow es "demasiadas funciones anidadas" (recursión sin control). Out of memory es "el heap creció más allá de la RAM disponible" (demasiados objetos). Un heap creciendo sin parar en /proc/<pid>/maps es indicador de memory leak.
+
+En Linux, un thread es un LWP (Light-Weight Process) — una "tarea" del kernel que comparte memoria con otras tareas del mismo proceso. Cada thread tiene su propio TID, estado, y contadores; se expone en /proc/<pid>/task/<tid>/ con la misma estructura que un proceso. El TID del "main thread" coincide con el PID del proceso. Este modelo se llama 1:1 (una tarea del kernel por thread de usuario).
+
+Un thread es un LWP (Light-Weight Process) que pertenece a un proceso y comparte con sus hermanos la memoria virtual, los file descriptors, el UID, el PID del proceso y el directorio de trabajo. Lo que no comparte: TID, stack propio, registros de CPU, estado, señales pendientes. Por eso son "livianos": crearlos no implica duplicar memoria. La contrapartida es que pueden pisarse mutuamente al acceder a variables compartidas → de ahí surge la necesidad de sincronización (locks, monitores, semáforos).
+
+El monitor usa multiprocessing por dos razones: (1) el GIL de Python impide que threads ejecuten bytecode en paralelo, así que solo procesos escapan al límite de un core; (2) los procesos están aislados — un bug en un analizador no tumba al resto — mientras que threads comparten memoria y un fallo se propaga.
+
+Copy-on-Write resuelve el problema de que fork() sería costoso si copiara toda la memoria del padre. En vez de eso, padre e hijo comparten las mismas páginas físicas marcadas read-only. Cuando alguno intenta escribir, el kernel copia esa página puntual y le da la copia privada al escritor. Consecuencia: fork() es rápido incluso para procesos de varios GB.
+
+El Manager.dict() permite que procesos con espacios de memoria totalmente independientes compartan una estructura de datos. Por debajo, cada proceso se comunica por sockets con un proceso servidor que mantiene el dict real. Los cambios de un proceso son visibles para los demás en su próxima lectura.
