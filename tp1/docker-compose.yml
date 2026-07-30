@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  monitor:
+    build: .
+    container_name: monitor-procesos
+    tty: true
+    stdin_open: true
+    pid: host
+    volumes:
+      - /proc:/proc:ro
+    command: python3 main.py

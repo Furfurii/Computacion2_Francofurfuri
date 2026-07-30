@@ -37,6 +37,11 @@ def leer_stat(pid):
         'nice': int(resto[16]),                   # campo 19
         'num_threads': int(resto[17]),            # campo 20
         'rss_paginas': int(resto[21]),            # campo 24 (memoria residente en páginas)
+        'minflt':  int(resto[6]),   # campo 10 (minor page faults propios)
+        'cminflt': int(resto[7]),   # campo 11 (minor faults hijos)
+        'majflt':  int(resto[8]),   # campo 12 (major page faults propios)
+        'cmajflt': int(resto[9]),   # campo 13 (major faults hijos)
+    
     }
     return datos
 def leer_meminfo():
@@ -278,7 +283,22 @@ def leer_stat_global():
     return datos
 
 
-
+def leer_status(pid):
+    """
+    Lee /proc/<pid>/status y devuelve un dict con los campos parseados.
+    Formato: cada línea es "campo:<tab>valor".
+    Devuelve None si el proceso ya no existe.
+    """
+    datos = {}
+    try:
+        with open(f'/proc/{pid}/status', 'r') as f:
+            for linea in f:
+                if ':' in linea:
+                    campo, valor = linea.split(':', 1)
+                    datos[campo] = valor.strip()
+    except FileNotFoundError:
+        return None
+    return datos
 
 
 if __name__ == '__main__':

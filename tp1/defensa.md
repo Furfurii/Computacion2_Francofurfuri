@@ -22,3 +22,5 @@ El monitor usa multiprocessing por dos razones: (1) el GIL de Python impide que 
 Copy-on-Write resuelve el problema de que fork() sería costoso si copiara toda la memoria del padre. En vez de eso, padre e hijo comparten las mismas páginas físicas marcadas read-only. Cuando alguno intenta escribir, el kernel copia esa página puntual y le da la copia privada al escritor. Consecuencia: fork() es rápido incluso para procesos de varios GB.
 
 El Manager.dict() permite que procesos con espacios de memoria totalmente independientes compartan una estructura de datos. Por debajo, cada proceso se comunica por sockets con un proceso servidor que mantiene el dict real. Los cambios de un proceso son visibles para los demás en su próxima lectura.
+
+Manejo del shutdown en múltiples capas: cada analizador captura BrokenPipeError/EOFError para salir limpio si el Manager muere primero. El proceso padre da timeout de 5s antes de escalar a SIGKILL con p.kill(). Esta redundancia elimina las trazas de error durante el shutdown, aunque el programa funcione correctamente aun sin ella.

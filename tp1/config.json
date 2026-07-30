@@ -1,0 +1,15 @@
+{
+    "intervalos": {
+        "resumen": 2,
+        "memoria": 3,
+        "fds": 5,
+        "threads": 2,
+        "senales": 10,
+        "scheduling": 10,
+        "sistema": 2
+    },
+    "filtros": {
+        "nombre": "",
+        "usuario": ""
+    }
+}
