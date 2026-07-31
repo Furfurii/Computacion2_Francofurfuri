@@ -24,3 +24,29 @@ Copy-on-Write resuelve el problema de que fork() sería costoso si copiara toda 
 El Manager.dict() permite que procesos con espacios de memoria totalmente independientes compartan una estructura de datos. Por debajo, cada proceso se comunica por sockets con un proceso servidor que mantiene el dict real. Los cambios de un proceso son visibles para los demás en su próxima lectura.
 
 Manejo del shutdown en múltiples capas: cada analizador captura BrokenPipeError/EOFError para salir limpio si el Manager muere primero. El proceso padre da timeout de 5s antes de escalar a SIGKILL con p.kill(). Esta redundancia elimina las trazas de error durante el shutdown, aunque el programa funcione correctamente aun sin ella.
+
+Evidencia del funcionamiento de SIGUSR1: al mandar kill -SIGUSR1 <PID> al proceso padre, se genera un archivo dump_<timestamp>.json con el snapshot completo. El archivo tiene las 7 claves del snapshot con datos reales de todos los procesos del sistema. Es prueba física de que:
+
+La señal fue capturada por el handler.
+El handler escribió el byte en el pipe.
+El loop principal leyó el byte y ejecutó dump_snapshot().
+La serialización JSON del Manager.dict() funcionó correctamente.
+
+Patrón self-pipe — por qué existe:
+
+Problema: los handlers de señales corren en un contexto especial donde muchas funciones de Python NO son seguras (llamadas "no async-signal-safe"). Ejemplos: print, json.dump, open, logging. Si el handler las llama, el programa puede deadlockear, corromper estructuras internas, o crashear impredeciblemente.
+
+Solución: el handler solo hace os.write(pipe, byte) — una de las pocas operaciones async-signal-safe según POSIX. El "trabajo pesado" (dump JSON, reload de config, prints) lo hace el loop principal en main.py, que lee bytes del pipe periódicamente y ejecuta la acción correspondiente en contexto normal.
+
+Los códigos de un byte son mnemónicos del inglés: T (Terminate), R (Reload), D (Dump), V (Verbose), W (Winch). El pipe transporta un identificador; el loop mapea identificador → acción.
+
+El pipe es no-bloqueante (fcntl.O_NONBLOCK) para que ni el handler pueda quedarse esperando al escribir ni el loop pueda quedarse esperando al leer. Todo fluye sin trabas.
+
+"Cuando mando una señal como SIGUSR1 al proceso del monitor, el kernel interrumpe el proceso y ejecuta el handler que registré. El handler NO escribe el JSON directamente porque estaría en un contexto especial de señal donde no es seguro hacer operaciones complejas — solo escribe un byte identificador (b'D') en un pipe. Termina inmediatamente y el proceso retoma lo que estaba haciendo. El loop principal del main.py, que corre siempre en contexto normal, revisa el pipe cada medio segundo. Cuando encuentra el byte b'D', ejecuta dump_snapshot() tranquilamente y escribe el JSON. El handler y el loop están desacoplados: solo se comunican a través del pipe."
+
+
+Qué es un handler: función registrada con signal.signal(SIGNAL, funcion) que el kernel ejecuta cuando llega esa señal al proceso. Se registra una vez y queda archivada; se dispara cuando corresponde. Interrumpe al proceso en el punto exacto donde estaba ejecutando, corre el handler, y devuelve el control al proceso donde había quedado.
+
+Por qué el handler tiene que ser mínimo: durante la interrupción, las estructuras internas del proceso (buffers de I/O, gestores de memoria, mutex internos de Python) pueden estar en estados intermedios. Si el handler llama funciones que tocan esas mismas estructuras (como print, open, json.dump), las modifica cuando el proceso original todavía las está usando → corrupción, deadlocks, crashes. POSIX define una lista de operaciones seguras ("async-signal-safe"): os.write, _exit, signal. Casi ninguna función "normal" de Python está en la lista.
+
+Cómo el self-pipe resuelve el problema: el handler solo hace os.write(pipe, byte) — operación async-signal-safe. El trabajo pesado (el dump, el reload) lo hace el loop principal fuera del contexto de señal. Handler y loop se comunican por el pipe; ninguno espera al otro.

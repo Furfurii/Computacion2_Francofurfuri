@@ -29,6 +29,9 @@ from rich.live import Live
 from rich.layout import Layout
 from rich.panel import Panel
 from rich.text import Text
+from rich.markup import escape
+
+from procfs import decodificar_mascara_senales
 
 
 # Mapa de teclas a vistas
@@ -43,6 +46,17 @@ TECLA_A_VISTA = {
 }
 
 ORDENES = ['cpu', 'rss', 'pid']
+MAX_FILAS = 22
+PASO_INTERVALO = 0.5
+INTERVALOS_MIN = {
+    'resumen': 0.5,
+    'memoria': 1.0,
+    'fds': 2.0,
+    'threads': 0.5,
+    'senales': 5.0,
+    'scheduling': 5.0,
+    'sistema': 1.0,
+}
 
 
 def display_main(snapshot, intervalos, control):
@@ -67,8 +81,15 @@ def display_main(snapshot, intervalos, control):
         'orden': 'pid',
         'pin': None,
         'scroll': 0,
+        'selected_pid': None,
+        'pids_actuales': [],
+        'input_mode': None,
+        'input_buffer': '',
+        'ayuda': False,
+        '_filtros_version_vista': -1,  # fuerza aplicar los defaults al arrancar
     }
-    
+    _aplicar_filtros_default(estado, control)
+
     try:
         import select
 
@@ -96,13 +117,16 @@ def display_main(snapshot, intervalos, control):
         with Live(_dibujar(snapshot, estado, intervalos), console=console,
                   refresh_per_second=4, screen=sys.stdout.isatty()) as live:
             while not control.get('salir', False):
+                # ¿SIGHUP recargó config.json? Aplicamos los nuevos filtros default.
+                _aplicar_filtros_default(estado, control)
+
                 # Leer teclado no bloqueante (100ms de timeout)
                 if teclado_habilitado and select.select([teclado], [], [], 0.1)[0]:
-                    tecla = teclado.read(1)
+                    tecla = _leer_tecla(teclado)
                     _procesar_tecla(tecla, estado, intervalos, control)
                 elif not teclado_habilitado:
                     time.sleep(0.25)
-                
+
                 # Refrescar la pantalla
                 live.update(_dibujar(snapshot, estado, intervalos))
     except Exception as e:
@@ -121,23 +145,118 @@ def display_main(snapshot, intervalos, control):
                 pass
 
 
+def _aplicar_filtros_default(estado, control):
+    """
+    Si 'filtros_version' en control cambió (arranque, o reload por SIGHUP),
+    pisa los filtros activos con los defaults de config.json.
+    """
+    version = control.get('filtros_version', 0)
+    if version == estado.get('_filtros_version_vista'):
+        return
+    estado['_filtros_version_vista'] = version
+    estado['filtro_nombre'] = control.get('filtro_nombre_default', '')
+    estado['filtro_usuario'] = control.get('filtro_usuario_default', '')
+    estado['scroll'] = 0
+    estado['selected_pid'] = None
+
+
 def _procesar_tecla(tecla, estado, intervalos, control):
     """Actualiza el estado local según la tecla presionada."""
-    if tecla in TECLA_A_VISTA:
+    if estado.get('input_mode'):
+        _procesar_input(tecla, estado)
+    elif tecla in TECLA_A_VISTA:
         estado['vista'] = TECLA_A_VISTA[tecla]
+        estado['scroll'] = 0
     elif tecla == 'q':
         control['salir'] = True
+    elif tecla in ('h', '?'):
+        estado['ayuda'] = not estado.get('ayuda', False)
+    elif tecla == '/':
+        estado['input_mode'] = 'nombre'
+        estado['input_buffer'] = estado.get('filtro_nombre', '')
+    elif tecla == 'u':
+        estado['input_mode'] = 'usuario'
+        estado['input_buffer'] = estado.get('filtro_usuario', '')
+    elif tecla in ('UP', 'DOWN'):
+        _mover_seleccion(tecla, estado)
+    elif tecla == 'ENTER':
+        pid = estado.get('selected_pid')
+        if pid is not None:
+            estado['pin'] = None if estado.get('pin') == pid else pid
     elif tecla == 'c':
         idx = ORDENES.index(estado['orden'])
         estado['orden'] = ORDENES[(idx + 1) % len(ORDENES)]
+        estado['scroll'] = 0
     elif tecla == '+':
         vista = estado['vista']
         if vista in intervalos:
-            intervalos[vista].value = min(intervalos[vista].value + 1, 60)
+            intervalos[vista].value = min(intervalos[vista].value + PASO_INTERVALO, 60)
     elif tecla == '-':
         vista = estado['vista']
         if vista in intervalos:
-            intervalos[vista].value = max(intervalos[vista].value - 1, 1)
+            minimo = INTERVALOS_MIN.get(vista, 1.0)
+            intervalos[vista].value = max(intervalos[vista].value - PASO_INTERVALO, minimo)
+
+
+def _leer_tecla(teclado):
+    """Lee una tecla; traduce flechas, Enter y Escape a nombres estables."""
+    import select
+
+    tecla = teclado.read(1)
+    if tecla in ('\r', '\n'):
+        return 'ENTER'
+    if tecla in ('\x7f', '\b'):
+        return 'BACKSPACE'
+    if tecla != '\x1b':
+        return tecla
+
+    secuencia = tecla
+    while select.select([teclado], [], [], 0.02)[0]:
+        secuencia += teclado.read(1)
+        if len(secuencia) >= 3:
+            break
+    if secuencia == '\x1b[A':
+        return 'UP'
+    if secuencia == '\x1b[B':
+        return 'DOWN'
+    return 'ESC'
+
+
+def _procesar_input(tecla, estado):
+    """Edita el filtro activo hasta Enter o Escape."""
+    if tecla == 'ENTER':
+        valor = estado.get('input_buffer', '').strip()
+        if estado['input_mode'] == 'nombre':
+            estado['filtro_nombre'] = valor
+        elif estado['input_mode'] == 'usuario':
+            estado['filtro_usuario'] = valor
+        estado['input_mode'] = None
+        estado['input_buffer'] = ''
+        estado['scroll'] = 0
+        estado['selected_pid'] = None
+    elif tecla == 'ESC':
+        estado['input_mode'] = None
+        estado['input_buffer'] = ''
+    elif tecla == 'BACKSPACE':
+        estado['input_buffer'] = estado.get('input_buffer', '')[:-1]
+    elif len(tecla) == 1 and tecla.isprintable():
+        estado['input_buffer'] = estado.get('input_buffer', '') + tecla
+
+
+def _mover_seleccion(tecla, estado):
+    pids = estado.get('pids_actuales', [])
+    if not pids:
+        return
+    seleccionado = estado.get('selected_pid')
+    try:
+        idx = pids.index(seleccionado)
+    except ValueError:
+        idx = 0
+    if tecla == 'UP':
+        idx = max(0, idx - 1)
+    else:
+        idx = min(len(pids) - 1, idx + 1)
+    estado['selected_pid'] = pids[idx]
 
 
 def _dibujar(snapshot, estado, intervalos):
@@ -151,19 +270,25 @@ def _dibujar(snapshot, estado, intervalos):
     
     vista = estado['vista']
     intervalo_actual = intervalos[vista].value if vista in intervalos else '?'
+    filtros = _texto_filtros(estado)
+    pin = estado.get('pin')
+    pin_txt = f" │ Pin: [cyan]{pin}[/]" if pin is not None else ""
     
     layout['header'].update(Panel(
         f"[bold cyan]Monitor de Procesos[/] │ Vista: [yellow]{vista}[/] │ "
-        f"Intervalo: [green]{intervalo_actual}s[/] │ Orden: [magenta]{estado['orden']}[/]",
+        f"Intervalo: [green]{_formatear_intervalo(intervalo_actual)}s[/] │ "
+        f"Orden: [magenta]{estado['orden']}[/]{pin_txt}{filtros}",
         style='blue',
     ))
     
-    # Renderizar la vista activa
-    tabla = _render_vista(vista, snapshot, estado)
+    if estado.get('ayuda'):
+        tabla = _render_ayuda()
+    else:
+        tabla = _render_vista(vista, snapshot, estado)
     layout['body'].update(tabla)
     
     layout['footer'].update(Panel(
-        "[dim]1-7: cambiar vista │ +/-: intervalo │ c: orden │ q: salir[/]",
+        _texto_footer(estado),
         style='blue',
     ))
     
@@ -178,21 +303,26 @@ def _render_vista(vista, snapshot, estado):
     datos = dict(snapshot[vista])
     
     if vista == 'sistema':
+        estado['pids_actuales'] = []
         return _render_sistema(datos)
     
     # El resto son tablas por PID
     tabla = Table(expand=True)
+    pids = _pids_para_mostrar(datos, estado)
     
     if vista == 'resumen':
         tabla.add_column("PID", justify="right", style="cyan")
         tabla.add_column("Nombre", style="green")
         tabla.add_column("Estado")
+        tabla.add_column("Usuario")
         tabla.add_column("PPID", justify="right")
         tabla.add_column("Threads", justify="right")
-        for pid in _ordenar_pids(datos, estado['orden']):
+        tabla.add_column("CPU%", justify="right")
+        for pid in pids:
             info = datos[pid]
             tabla.add_row(str(pid), info['nombre'], info['estado'],
-                          str(info['ppid']), str(info['threads']))
+                          info.get('usuario', ''), str(info['ppid']), str(info['threads']),
+                          f"{info.get('cpu', 0):.1f}", style=_estilo_fila(pid, estado))
     
     elif vista == 'memoria':
         tabla.add_column("PID", justify="right", style="cyan")
@@ -201,52 +331,104 @@ def _render_vista(vista, snapshot, estado):
         tabla.add_column("Swap", justify="right")
         tabla.add_column("MinFlt", justify="right")
         tabla.add_column("MajFlt", justify="right")
-        for pid in _ordenar_pids(datos, estado['orden']):
+        tabla.add_column("Detalle (HWM · VmData/Stk/Exe/Lib · Heap/Stack/Lib)")
+        seleccionado = estado.get('selected_pid')
+        for pid in pids:
             info = datos[pid]
             tabla.add_row(str(pid), info['rss'], info['vsize'], info['swap'],
-                          str(info['minflt']), str(info['majflt']))
+                          str(info['minflt']), str(info['majflt']), "",
+                          style=_estilo_fila(pid, estado))
+            if pid == seleccionado:
+                detalle = (
+                    f"HWM:{info['hwm']} | "
+                    f"Data:{info['vmdata']} Stk:{info['vmstk']} "
+                    f"Exe:{info['vmexe']} Lib:{info['vmlib']} | "
+                    f"Heap:{info['heap_segs']}segs/{info['heap_bytes'] // 1024}KB "
+                    f"Stack:{info['stack_segs']}segs/{info['stack_bytes'] // 1024}KB "
+                    f"Lib:{info['lib_segs']}segs/{info['lib_bytes'] // 1024}KB"
+                )
+                tabla.add_row("  └─", "", "", "", "", "", escape(detalle), style='dim')
     
     elif vista == 'fds':
-        tabla.add_column("PID", justify="right", style="cyan")
-        tabla.add_column("Total", justify="right")
-        tabla.add_column("Por tipo")
-        for pid in _ordenar_pids(datos, estado['orden']):
+        tabla.add_column("PID / FD", justify="right", style="cyan")
+        tabla.add_column("Total / Destino")
+        tabla.add_column("Por tipo / Tipo")
+        seleccionado = estado.get('selected_pid')
+        for pid in pids:
             info = datos[pid]
             tipos_str = ', '.join(f"{k}:{v}" for k, v in info['por_tipo'].items())
-            tabla.add_row(str(pid), str(info['total']), tipos_str)
+            tabla.add_row(str(pid), str(info['total']), tipos_str,
+                          style=_estilo_fila(pid, estado))
+            if pid == seleccionado:
+                for fd in info.get('fds', []):
+                    tabla.add_row(
+                        f"  └─{fd['fd']}", escape(fd['destino']), fd['tipo'],
+                        style='dim',
+                    )
     
     elif vista == 'threads':
-        tabla.add_column("PID", justify="right", style="cyan")
-        tabla.add_column("Cantidad", justify="right")
-        tabla.add_column("Por estado")
-        for pid in _ordenar_pids(datos, estado['orden']):
+        tabla.add_column("PID / TID", justify="right", style="cyan")
+        tabla.add_column("Nombre")
+        tabla.add_column("Estado")
+        tabla.add_column("CPU%", justify="right")
+        tabla.add_column("Ctx Vol", justify="right")
+        tabla.add_column("Ctx Invol", justify="right")
+        seleccionado = estado.get('selected_pid')
+        for pid in pids:
             info = datos[pid]
             estados_str = ', '.join(f"{k}:{v}" for k, v in info['por_estado'].items())
-            tabla.add_row(str(pid), str(info['cantidad']), estados_str)
+            tabla.add_row(str(pid), f"{info['cantidad']} threads", estados_str,
+                          f"{info['cpu']:.1f}", "", "",
+                          style=_estilo_fila(pid, estado))
+            if pid == seleccionado:
+                for t in info.get('threads', []):
+                    tabla.add_row(
+                        f"  └─{t['tid']}", t['nombre'], t['estado'],
+                        f"{t['cpu']:.1f}", str(t['ctx_vol']), str(t['ctx_invol']),
+                        style='dim',
+                    )
     
     elif vista == 'senales':
         tabla.add_column("PID", justify="right", style="cyan")
-        tabla.add_column("SigBlk (hex)")
-        tabla.add_column("SigIgn (hex)")
-        tabla.add_column("SigCgt (hex)")
-        tabla.add_column("SigPnd (hex)")
-        for pid in _ordenar_pids(datos, estado['orden']):
+        tabla.add_column("Bloqueadas (SigBlk)")
+        tabla.add_column("Ignoradas (SigIgn)")
+        tabla.add_column("Con handler (SigCgt)")
+        tabla.add_column("Pendientes (SigPnd)")
+        for pid in pids:
             info = datos[pid]
-            tabla.add_row(str(pid), info['blk'], info['ign'], info['cgt'], info['pnd'])
+            tabla.add_row(
+                str(pid),
+                _texto_senales(info['blk']),
+                _texto_senales(info['ign']),
+                _texto_senales(info['cgt']),
+                _texto_senales(info['pnd']),
+                style=_estilo_fila(pid, estado),
+            )
     
     elif vista == 'scheduling':
         tabla.add_column("PID", justify="right", style="cyan")
         tabla.add_column("Nice", justify="right")
         tabla.add_column("Priority", justify="right")
+        tabla.add_column("RT Prio", justify="right")
         tabla.add_column("Policy")
+        tabla.add_column("Affinity")
         tabla.add_column("Ctx Vol", justify="right")
         tabla.add_column("Ctx Invol", justify="right")
-        for pid in _ordenar_pids(datos, estado['orden']):
+        for pid in pids:
             info = datos[pid]
             tabla.add_row(str(pid), str(info['nice']), str(info['priority']),
-                          info['policy'], str(info['ctx_vol']), str(info['ctx_invol']))
+                          str(info['rt_priority']), info['policy'],
+                          escape(info.get('cpu_affinity', '')),
+                          str(info['ctx_vol']), str(info['ctx_invol']),
+                          style=_estilo_fila(pid, estado))
     
     return tabla
+
+
+def _texto_senales(mascara_hex):
+    """Decodifica una máscara hex de señales a nombres separados por coma."""
+    nombres = decodificar_mascara_senales(mascara_hex)
+    return ', '.join(nombres) if nombres else '-'
 
 
 def _render_sistema(datos):
@@ -287,10 +469,163 @@ def _render_sistema(datos):
     return Panel(texto, title="Sistema", border_style="cyan")
 
 
+def _pids_para_mostrar(datos, estado):
+    pids = _ordenar_pids(datos, estado['orden'])
+    pids = _aplicar_filtros(pids, datos, estado)
+    estado['pids_actuales'] = pids
+
+    if not pids:
+        estado['selected_pid'] = None
+        estado['scroll'] = 0
+        return []
+
+    seleccionado = estado.get('selected_pid')
+    if seleccionado not in pids:
+        seleccionado = pids[0]
+        estado['selected_pid'] = seleccionado
+
+    idx = pids.index(seleccionado)
+    scroll = estado.get('scroll', 0)
+    if idx < scroll:
+        scroll = idx
+    elif idx >= scroll + MAX_FILAS:
+        scroll = idx - MAX_FILAS + 1
+
+    max_scroll = max(0, len(pids) - MAX_FILAS)
+    scroll = max(0, min(scroll, max_scroll))
+    estado['scroll'] = scroll
+
+    visibles = pids[scroll:scroll + MAX_FILAS]
+    pin = estado.get('pin')
+    if pin in pids:
+        if pin in visibles:
+            visibles.remove(pin)
+        visibles.insert(0, pin)
+        visibles = visibles[:MAX_FILAS]
+    return visibles
+
+
+def _aplicar_filtros(pids, datos, estado):
+    filtro_nombre = estado.get('filtro_nombre', '').lower()
+    filtro_usuario = estado.get('filtro_usuario', '').lower()
+    filtrados = []
+
+    for pid in pids:
+        if filtro_nombre and filtro_nombre not in _nombre_pid(pid, datos).lower():
+            continue
+        if filtro_usuario and filtro_usuario not in _usuario_pid(pid).lower():
+            continue
+        filtrados.append(pid)
+
+    return filtrados
+
+
+def _nombre_pid(pid, datos):
+    info = datos.get(pid, {})
+    nombre = info.get('nombre', '')
+
+    try:
+        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            cmdline = f.read().replace(b'\x00', b' ').decode(errors='ignore').strip()
+            if cmdline:
+                return cmdline
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        pass
+
+    if nombre:
+        return nombre
+
+    try:
+        with open(f'/proc/{pid}/comm', 'r') as f:
+            return f.read().strip()
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return ''
+
+
+def _usuario_pid(pid):
+    try:
+        with open(f'/proc/{pid}/status', 'r') as f:
+            for linea in f:
+                if linea.startswith('Uid:'):
+                    uid = int(linea.split()[1])
+                    break
+            else:
+                return ''
+    except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+        return ''
+
+    try:
+        import pwd
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return str(uid)
+
+
+def _estilo_fila(pid, estado):
+    seleccionado = pid == estado.get('selected_pid')
+    pineado = pid == estado.get('pin')
+    if seleccionado and pineado:
+        return 'bold reverse magenta'
+    if seleccionado:
+        return 'reverse'
+    if pineado:
+        return 'bold magenta'
+    return None
+
+
+def _render_ayuda():
+    texto = Text()
+    texto.append("Vistas\n", style="bold cyan")
+    texto.append("  1/r resumen  2/m memoria  3/f fds  4/t threads\n")
+    texto.append("  5/s senales  6/p scheduling  7/g sistema\n\n")
+    texto.append("Navegacion\n", style="bold cyan")
+    texto.append("  ↑/↓ seleccionar proceso    Enter pinear/despinear\n")
+    texto.append("  c alternar orden CPU/RSS/PID    +/- ajustar intervalo\n\n")
+    texto.append("Filtros y salida\n", style="bold cyan")
+    texto.append("  / filtrar por comando    u filtrar por usuario\n")
+    texto.append("  h/? ocultar ayuda        q salir limpiamente\n")
+    return Panel(texto, title="Ayuda", border_style="cyan")
+
+
+def _texto_filtros(estado):
+    partes = []
+    if estado.get('filtro_nombre'):
+        partes.append(f"cmd={escape(estado['filtro_nombre'])}")
+    if estado.get('filtro_usuario'):
+        partes.append(f"user={escape(estado['filtro_usuario'])}")
+    return f" │ Filtro: [cyan]{' '.join(partes)}[/]" if partes else ""
+
+
+def _texto_footer(estado):
+    if estado.get('input_mode'):
+        etiqueta = 'comando' if estado['input_mode'] == 'nombre' else 'usuario'
+        valor = escape(estado.get('input_buffer', ''))
+        return f"[dim]Filtro por {etiqueta}: {valor} │ Enter aplicar │ Esc cancelar[/]"
+    return (
+        "[dim]1-7 vista │ ↑↓ navegar │ Enter pin │ / cmd │ u usuario │ "
+        "c orden │ +/- intervalo │ h/? ayuda │ q salir[/]"
+    )
+
+
+def _formatear_intervalo(valor):
+    try:
+        valor = float(valor)
+    except (TypeError, ValueError):
+        return str(valor)
+    if valor.is_integer():
+        return str(int(valor))
+    return f"{valor:.1f}"
+
+
 def _ordenar_pids(datos, orden):
     """Devuelve los PIDs ordenados según el criterio elegido."""
     if orden == 'pid':
         return sorted(datos.keys())
+    elif orden == 'cpu':
+        return sorted(
+            datos.keys(),
+            key=lambda pid: (-_float_o_cero(datos[pid].get('cpu', 0)), pid),
+        )
     elif orden == 'rss':
         def rss_int(pid):
             rss_str = datos[pid].get('rss', '0 kB')
@@ -298,6 +633,13 @@ def _ordenar_pids(datos, orden):
                 return int(rss_str.split()[0])
             except (ValueError, IndexError):
                 return 0
-        return sorted(datos.keys(), key=rss_int, reverse=True)
+        return sorted(datos.keys(), key=lambda pid: (-rss_int(pid), pid))
     else:
         return sorted(datos.keys())
+
+
+def _float_o_cero(valor):
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return 0.0

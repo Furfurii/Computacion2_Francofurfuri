@@ -31,25 +31,31 @@ def main():
     # 1. Cargar configuración
     config = senales.cargar_config('config.json')
     intervalos_cfg = config.get('intervalos', {})
-    
+    filtros_cfg = config.get('filtros', {})
+
     # 2. Instalar handlers de señales (self-pipe)
     pipe_fd = senales.instalar_handlers()
-    
+
     with Manager() as manager:
         # 3. Snapshot compartido
         snapshot = manager.dict()
         control = manager.dict()   # {'salir': bool}
         control['salir'] = False
+        # Filtros default: el display los aplica al arrancar y cada vez que
+        # 'filtros_version' cambia (lo dispara un reload por SIGHUP).
+        control['filtro_nombre_default'] = filtros_cfg.get('nombre', '')
+        control['filtro_usuario_default'] = filtros_cfg.get('usuario', '')
+        control['filtros_version'] = 0
         
         # 4. Values de intervalos ajustables
         intervalos = {
-            'resumen':    Value('i', intervalos_cfg.get('resumen', 2)),
-            'memoria':    Value('i', intervalos_cfg.get('memoria', 3)),
-            'fds':        Value('i', intervalos_cfg.get('fds', 5)),
-            'threads':    Value('i', intervalos_cfg.get('threads', 2)),
-            'senales':    Value('i', intervalos_cfg.get('senales', 10)),
-            'scheduling': Value('i', intervalos_cfg.get('scheduling', 10)),
-            'sistema':    Value('i', intervalos_cfg.get('sistema', 2)),
+            'resumen':    Value('d', intervalos_cfg.get('resumen', 2)),
+            'memoria':    Value('d', intervalos_cfg.get('memoria', 3)),
+            'fds':        Value('d', intervalos_cfg.get('fds', 5)),
+            'threads':    Value('d', intervalos_cfg.get('threads', 2)),
+            'senales':    Value('d', intervalos_cfg.get('senales', 10)),
+            'scheduling': Value('d', intervalos_cfg.get('scheduling', 10)),
+            'sistema':    Value('d', intervalos_cfg.get('sistema', 2)),
         }
         
         # 5. Definir procesos hijos
@@ -70,6 +76,7 @@ def main():
         
         print(f"[main] Monitor arrancado con {len(procesos)} procesos. PID padre: {os.getpid()}")
         print("[main] Ctrl+C para salir. SIGUSR1 para dump. SIGHUP para reload.")
+        time.sleep(2)
         
         # 7. Loop principal: leer del self-pipe y actuar
         try:
@@ -88,6 +95,10 @@ def main():
                     for nombre, val in nueva_cfg.get('intervalos', {}).items():
                         if nombre in intervalos:
                             intervalos[nombre].value = val
+                    nuevos_filtros = nueva_cfg.get('filtros', {})
+                    control['filtro_nombre_default'] = nuevos_filtros.get('nombre', '')
+                    control['filtro_usuario_default'] = nuevos_filtros.get('usuario', '')
+                    control['filtros_version'] = control['filtros_version'] + 1
                 elif evento == b'D': # SIGUSR1 → dump
                     ruta = senales.dump_snapshot(snapshot)
                     print(f"\n[main] Snapshot dumpeado en {ruta}")

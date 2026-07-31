@@ -1,4 +1,41 @@
 import os
+import pwd
+import signal
+
+CLK_TCK = os.sysconf('SC_CLK_TCK')  # jiffies por segundo (típicamente 100)
+
+
+def resolver_usuario(uid):
+    """Convierte un UID numérico en nombre de usuario vía /etc/passwd (pwd)."""
+    try:
+        return pwd.getpwuid(int(uid)).pw_name
+    except (KeyError, ValueError, TypeError):
+        return str(uid)
+
+
+def calcular_cpu_pct(historial_previo, historial_nuevo, clave, jiffies, timestamp):
+    """
+    Calcula el % de CPU comparando esta lectura de jiffies acumulados (utime+stime)
+    contra la lectura anterior guardada en 'historial_previo' para esa 'clave'
+    (pid o tid). Guarda la lectura actual en 'historial_nuevo' para la próxima vuelta.
+
+    % CPU = (delta_jiffies / CLK_TCK) / delta_tiempo_real * 100
+
+    Devuelve 0.0 la primera vez que se ve esa clave (todavía no hay lectura previa).
+    """
+    historial_nuevo[clave] = (jiffies, timestamp)
+    anterior = historial_previo.get(clave)
+    if anterior is None:
+        return 0.0
+
+    jiffies_prev, ts_prev = anterior
+    delta_tiempo = timestamp - ts_prev
+    if delta_tiempo <= 0:
+        return 0.0
+
+    delta_jiffies = jiffies - jiffies_prev
+    return max(0.0, (delta_jiffies / CLK_TCK) / delta_tiempo * 100)
+
 
 def listar_pids():
     pids = []
@@ -34,13 +71,16 @@ def leer_stat(pid):
         'sid': int(resto[3]),                     # campo 6 (sesión)
         'utime': int(resto[11]),                  # campo 14 (tiempo en user mode)
         'stime': int(resto[12]),                  # campo 15 (tiempo en kernel mode)
+        'priority': int(resto[15]),                # campo 18
         'nice': int(resto[16]),                   # campo 19
         'num_threads': int(resto[17]),            # campo 20
         'rss_paginas': int(resto[21]),            # campo 24 (memoria residente en páginas)
-        'minflt':  int(resto[6]),   # campo 10 (minor page faults propios)
-        'cminflt': int(resto[7]),   # campo 11 (minor faults hijos)
-        'majflt':  int(resto[8]),   # campo 12 (major page faults propios)
-        'cmajflt': int(resto[9]),   # campo 13 (major faults hijos)
+        'minflt':  int(resto[7]),   # campo 10 (minor page faults propios)
+        'cminflt': int(resto[8]),   # campo 11 (minor faults hijos)
+        'majflt':  int(resto[9]),   # campo 12 (major page faults propios)
+        'cmajflt': int(resto[10]),  # campo 13 (major faults hijos)
+        'rt_priority': int(resto[37]),             # campo 40
+        'policy': int(resto[38]),                  # campo 41
     
     }
     return datos
@@ -207,19 +247,29 @@ def leer_threads(pid):
                     linea = f.read()
                 with open(f'/proc/{pid}/task/{tid}/comm', 'r') as f:
                     nombre = f.read().strip()
+                ctx_vol = 0
+                ctx_invol = 0
+                with open(f'/proc/{pid}/task/{tid}/status', 'r') as f:
+                    for linea_status in f:
+                        if linea_status.startswith('voluntary_ctxt_switches'):
+                            ctx_vol = int(linea_status.split(':')[1])
+                        elif linea_status.startswith('nonvoluntary_ctxt_switches'):
+                            ctx_invol = int(linea_status.split(':')[1])
             except (FileNotFoundError, PermissionError):
                 continue  # thread murió mientras iterábamos
-            
+
             # Extraemos el estado del thread (mismo truco que leer_stat)
             corte = linea.rfind(')')
             resto = linea[corte + 2:].split()
-            
+
             threads.append({
                 'tid': tid,
                 'estado': resto[0],       # R/S/D/T/Z, igual que para procesos
                 'nombre': nombre,          # nombre del thread (puede ser distinto al del proceso)
                 'utime': int(resto[11]),
                 'stime': int(resto[12]),
+                'ctx_vol': ctx_vol,        # /proc/<pid>/task/<tid>/status: voluntary_ctxt_switches
+                'ctx_invol': ctx_invol,    # nonvoluntary_ctxt_switches
             })
     except (FileNotFoundError, PermissionError):
         return None
@@ -281,6 +331,29 @@ def leer_stat_global():
         return None
     
     return datos
+
+
+def decodificar_mascara_senales(mascara_hex):
+    """
+    Convierte una máscara hex de 64 bits (SigBlk, SigIgn, SigCgt, SigPnd, ShdPnd)
+    en la lista de nombres de señales que representa (ej: ['SIGINT', 'SIGTERM']).
+    Cada bit puesto en la máscara corresponde a la señal cuyo número es esa posición
+    (bit 0 = señal 1 = SIGHUP, bit 1 = señal 2 = SIGINT, etc.).
+    """
+    try:
+        mascara = int(mascara_hex, 16)
+    except (TypeError, ValueError):
+        return []
+
+    nombres = []
+    for numero_senal in range(1, 65):
+        if not (mascara & (1 << (numero_senal - 1))):
+            continue
+        try:
+            nombres.append(signal.Signals(numero_senal).name)
+        except ValueError:
+            nombres.append(f'RT{numero_senal}')
+    return nombres
 
 
 def leer_status(pid):
