@@ -46,7 +46,6 @@ TECLA_A_VISTA = {
 }
 
 ORDENES = ['cpu', 'rss', 'pid']
-MAX_FILAS = 22
 PASO_INTERVALO = 0.5
 INTERVALOS_MIN = {
     'resumen': 0.5,
@@ -114,7 +113,8 @@ def display_main(snapshot, intervalos, control):
                 markup=False,
             )
 
-        with Live(_dibujar(snapshot, estado, intervalos), console=console,
+        eof_repetido = 0
+        with Live(_dibujar(snapshot, estado, intervalos, console), console=console,
                   refresh_per_second=4, screen=sys.stdout.isatty()) as live:
             while not control.get('salir', False):
                 # ¿SIGHUP recargó config.json? Aplicamos los nuevos filtros default.
@@ -123,12 +123,29 @@ def display_main(snapshot, intervalos, control):
                 # Leer teclado no bloqueante (100ms de timeout)
                 if teclado_habilitado and select.select([teclado], [], [], 0.1)[0]:
                     tecla = _leer_tecla(teclado)
-                    _procesar_tecla(tecla, estado, intervalos, control)
+                    if tecla is None:
+                        # select dijo "hay datos" pero read() devolvió EOF: el fd
+                        # está roto (típico de /dev/tty mal armado dentro de un
+                        # contenedor). Sin este freno, select seguiría "listo" al
+                        # instante en cada vuelta y el loop giraría sin pausa,
+                        # parpadeando la pantalla sin poder leer teclas reales.
+                        eof_repetido += 1
+                        time.sleep(0.05)
+                        if eof_repetido >= 10:
+                            teclado_habilitado = False
+                            error_console.print(
+                                "[display] /dev/tty dejó de responder (EOF): "
+                                "paso a modo solo lectura.",
+                                markup=False,
+                            )
+                    else:
+                        eof_repetido = 0
+                        _procesar_tecla(tecla, estado, intervalos, control)
                 elif not teclado_habilitado:
                     time.sleep(0.25)
 
                 # Refrescar la pantalla
-                live.update(_dibujar(snapshot, estado, intervalos))
+                live.update(_dibujar(snapshot, estado, intervalos, console))
     except Exception as e:
         control['display_error'] = repr(e)
         error_console.print(f"[display] error: {e!r}", markup=False)
@@ -199,10 +216,17 @@ def _procesar_tecla(tecla, estado, intervalos, control):
 
 
 def _leer_tecla(teclado):
-    """Lee una tecla; traduce flechas, Enter y Escape a nombres estables."""
+    """
+    Lee una tecla; traduce flechas, Enter y Escape a nombres estables.
+    Devuelve None si la lectura vino vacía (EOF: el fd ya no entrega datos,
+    p.ej. /dev/tty roto dentro de un contenedor) para que el loop principal
+    pueda distinguirlo de "se apretó una tecla real" y no haga spin.
+    """
     import select
 
     tecla = teclado.read(1)
+    if tecla == '':
+        return None
     if tecla in ('\r', '\n'):
         return 'ENTER'
     if tecla in ('\x7f', '\b'):
@@ -211,13 +235,23 @@ def _leer_tecla(teclado):
         return tecla
 
     secuencia = tecla
-    while select.select([teclado], [], [], 0.02)[0]:
+    # 1s, no 20ms: medido en la práctica (ver debug_teclado.py), el resto de
+    # la secuencia (el '[' y la letra) a veces tarda cientos de ms — incluso
+    # segundos, en un caso puntual — en llegar, por hiccups del terminal o
+    # del sistema. Con una ventana corta, un toque real de flecha se leía
+    # como un ESC suelto (sin efecto) seguido de '[' y letra sueltos (también
+    # sin efecto). Una tecla Escape real es rarísima en esta app, así que
+    # perder hasta 1s en detectarla como tal es un costo aceptable a cambio
+    # de no perder toques de flecha reales.
+    while select.select([teclado], [], [], 1.0)[0]:
         secuencia += teclado.read(1)
         if len(secuencia) >= 3:
             break
-    if secuencia == '\x1b[A':
+    # CSI ('\x1b[A') es lo más común; algunas terminales en "application cursor
+    # keys mode" mandan SS3 ('\x1bOA') en su lugar. Aceptamos ambas.
+    if secuencia in ('\x1b[A', '\x1bOA'):
         return 'UP'
-    if secuencia == '\x1b[B':
+    if secuencia in ('\x1b[B', '\x1bOB'):
         return 'DOWN'
     return 'ESC'
 
@@ -259,7 +293,7 @@ def _mover_seleccion(tecla, estado):
     estado['selected_pid'] = pids[idx]
 
 
-def _dibujar(snapshot, estado, intervalos):
+def _dibujar(snapshot, estado, intervalos, console):
     """Construye el Layout completo con header, tabla y footer."""
     layout = Layout()
     layout.split_column(
@@ -267,7 +301,14 @@ def _dibujar(snapshot, estado, intervalos):
         Layout(name='body'),
         Layout(name='footer', size=3),
     )
-    
+
+    # Header (3) + footer (3) le sacan 6 líneas al alto real de la terminal,
+    # y la tabla de rich agrega otras 4 propias (borde superior, encabezado,
+    # separador de encabezado, borde inferior) que no son filas de datos.
+    # Sin restar esas 4, el scroll interno calculaba filas "visibles" que en
+    # realidad Rich recortaba en silencio al no entrar en la terminal real.
+    max_filas = max(5, console.size.height - 6 - 4)
+
     vista = estado['vista']
     intervalo_actual = intervalos[vista].value if vista in intervalos else '?'
     filtros = _texto_filtros(estado)
@@ -284,7 +325,7 @@ def _dibujar(snapshot, estado, intervalos):
     if estado.get('ayuda'):
         tabla = _render_ayuda()
     else:
-        tabla = _render_vista(vista, snapshot, estado)
+        tabla = _render_vista(vista, snapshot, estado, max_filas)
     layout['body'].update(tabla)
     
     layout['footer'].update(Panel(
@@ -295,20 +336,20 @@ def _dibujar(snapshot, estado, intervalos):
     return layout
 
 
-def _render_vista(vista, snapshot, estado):
+def _render_vista(vista, snapshot, estado, max_filas):
     """Devuelve un renderable de Rich para la vista pedida."""
     if vista not in snapshot:
         return Panel(f"[yellow]Esperando datos de '{vista}'...[/]")
-    
+
     datos = dict(snapshot[vista])
-    
+
     if vista == 'sistema':
         estado['pids_actuales'] = []
         return _render_sistema(datos)
-    
+
     # El resto son tablas por PID
     tabla = Table(expand=True)
-    pids = _pids_para_mostrar(datos, estado)
+    pids = _pids_para_mostrar(datos, estado, max_filas)
     
     if vista == 'resumen':
         tabla.add_column("PID", justify="right", style="cyan")
@@ -320,7 +361,7 @@ def _render_vista(vista, snapshot, estado):
         tabla.add_column("CPU%", justify="right")
         for pid in pids:
             info = datos[pid]
-            tabla.add_row(str(pid), info['nombre'], info['estado'],
+            tabla.add_row(_marca_pid(pid, estado), info['nombre'], info['estado'],
                           info.get('usuario', ''), str(info['ppid']), str(info['threads']),
                           f"{info.get('cpu', 0):.1f}", style=_estilo_fila(pid, estado))
     
@@ -335,7 +376,7 @@ def _render_vista(vista, snapshot, estado):
         seleccionado = estado.get('selected_pid')
         for pid in pids:
             info = datos[pid]
-            tabla.add_row(str(pid), info['rss'], info['vsize'], info['swap'],
+            tabla.add_row(_marca_pid(pid, estado), info['rss'], info['vsize'], info['swap'],
                           str(info['minflt']), str(info['majflt']), "",
                           style=_estilo_fila(pid, estado))
             if pid == seleccionado:
@@ -357,7 +398,7 @@ def _render_vista(vista, snapshot, estado):
         for pid in pids:
             info = datos[pid]
             tipos_str = ', '.join(f"{k}:{v}" for k, v in info['por_tipo'].items())
-            tabla.add_row(str(pid), str(info['total']), tipos_str,
+            tabla.add_row(_marca_pid(pid, estado), str(info['total']), tipos_str,
                           style=_estilo_fila(pid, estado))
             if pid == seleccionado:
                 for fd in info.get('fds', []):
@@ -377,7 +418,7 @@ def _render_vista(vista, snapshot, estado):
         for pid in pids:
             info = datos[pid]
             estados_str = ', '.join(f"{k}:{v}" for k, v in info['por_estado'].items())
-            tabla.add_row(str(pid), f"{info['cantidad']} threads", estados_str,
+            tabla.add_row(_marca_pid(pid, estado), f"{info['cantidad']} threads", estados_str,
                           f"{info['cpu']:.1f}", "", "",
                           style=_estilo_fila(pid, estado))
             if pid == seleccionado:
@@ -397,7 +438,7 @@ def _render_vista(vista, snapshot, estado):
         for pid in pids:
             info = datos[pid]
             tabla.add_row(
-                str(pid),
+                _marca_pid(pid, estado),
                 _texto_senales(info['blk']),
                 _texto_senales(info['ign']),
                 _texto_senales(info['cgt']),
@@ -416,7 +457,7 @@ def _render_vista(vista, snapshot, estado):
         tabla.add_column("Ctx Invol", justify="right")
         for pid in pids:
             info = datos[pid]
-            tabla.add_row(str(pid), str(info['nice']), str(info['priority']),
+            tabla.add_row(_marca_pid(pid, estado), str(info['nice']), str(info['priority']),
                           str(info['rt_priority']), info['policy'],
                           escape(info.get('cpu_affinity', '')),
                           str(info['ctx_vol']), str(info['ctx_invol']),
@@ -469,7 +510,7 @@ def _render_sistema(datos):
     return Panel(texto, title="Sistema", border_style="cyan")
 
 
-def _pids_para_mostrar(datos, estado):
+def _pids_para_mostrar(datos, estado, max_filas):
     pids = _ordenar_pids(datos, estado['orden'])
     pids = _aplicar_filtros(pids, datos, estado)
     estado['pids_actuales'] = pids
@@ -488,20 +529,20 @@ def _pids_para_mostrar(datos, estado):
     scroll = estado.get('scroll', 0)
     if idx < scroll:
         scroll = idx
-    elif idx >= scroll + MAX_FILAS:
-        scroll = idx - MAX_FILAS + 1
+    elif idx >= scroll + max_filas:
+        scroll = idx - max_filas + 1
 
-    max_scroll = max(0, len(pids) - MAX_FILAS)
+    max_scroll = max(0, len(pids) - max_filas)
     scroll = max(0, min(scroll, max_scroll))
     estado['scroll'] = scroll
 
-    visibles = pids[scroll:scroll + MAX_FILAS]
+    visibles = pids[scroll:scroll + max_filas]
     pin = estado.get('pin')
     if pin in pids:
         if pin in visibles:
             visibles.remove(pin)
         visibles.insert(0, pin)
-        visibles = visibles[:MAX_FILAS]
+        visibles = visibles[:max_filas]
     return visibles
 
 
@@ -559,6 +600,15 @@ def _usuario_pid(pid):
         return pwd.getpwuid(uid).pw_name
     except KeyError:
         return str(uid)
+
+
+def _marca_pid(pid, estado):
+    """
+    Prefijo visible para la fila seleccionada. No depende de que el estilo
+    'reverse' se note bien en una terminal/tema en particular: cambia el
+    contenido de la celda, no solo su color.
+    """
+    return f"▶{pid}" if pid == estado.get('selected_pid') else str(pid)
 
 
 def _estilo_fila(pid, estado):
