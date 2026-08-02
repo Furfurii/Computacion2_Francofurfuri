@@ -347,9 +347,15 @@ def _render_vista(vista, snapshot, estado, max_filas):
         estado['pids_actuales'] = []
         return _render_sistema(datos)
 
+    # Nombre/usuario/cmdline para filtrar salen siempre de 'resumen' (la única
+    # vista que los calcula para TODOS los PIDs), nunca releyendo /proc acá:
+    # evita repetir esa resolución en cada analizador y evita un TOCTOU extra
+    # sobre PIDs que ya vienen de un snapshot con varios segundos de atraso.
+    resumen_datos = datos if vista == 'resumen' else dict(snapshot.get('resumen', {}))
+
     # El resto son tablas por PID
     tabla = Table(expand=True)
-    pids = _pids_para_mostrar(datos, estado, max_filas)
+    pids = _pids_para_mostrar(datos, resumen_datos, estado, max_filas)
     
     if vista == 'resumen':
         tabla.add_column("PID", justify="right", style="cyan")
@@ -510,9 +516,9 @@ def _render_sistema(datos):
     return Panel(texto, title="Sistema", border_style="cyan")
 
 
-def _pids_para_mostrar(datos, estado, max_filas):
+def _pids_para_mostrar(datos, resumen_datos, estado, max_filas):
     pids = _ordenar_pids(datos, estado['orden'])
-    pids = _aplicar_filtros(pids, datos, estado)
+    pids = _aplicar_filtros(pids, resumen_datos, estado)
     estado['pids_actuales'] = pids
 
     if not pids:
@@ -546,60 +552,31 @@ def _pids_para_mostrar(datos, estado, max_filas):
     return visibles
 
 
-def _aplicar_filtros(pids, datos, estado):
+def _aplicar_filtros(pids, resumen_datos, estado):
+    """
+    Filtra por nombre/usuario usando SOLO datos ya presentes en el snapshot
+    (calculados una vez por el analizador 'resumen' para todos los PIDs).
+    Un PID que 'resumen' todavía no vio (recién nacido, o murió y viene de
+    una vista con snapshot más viejo) simplemente no matchea ningún filtro
+    no vacío, en vez de ir a tocar /proc por su cuenta.
+    """
     filtro_nombre = estado.get('filtro_nombre', '').lower()
     filtro_usuario = estado.get('filtro_usuario', '').lower()
     filtrados = []
 
     for pid in pids:
-        if filtro_nombre and filtro_nombre not in _nombre_pid(pid, datos).lower():
+        info = resumen_datos.get(pid, {})
+        if filtro_nombre and filtro_nombre not in _nombre_pid(info).lower():
             continue
-        if filtro_usuario and filtro_usuario not in _usuario_pid(pid).lower():
+        if filtro_usuario and filtro_usuario not in info.get('usuario', '').lower():
             continue
         filtrados.append(pid)
 
     return filtrados
 
 
-def _nombre_pid(pid, datos):
-    info = datos.get(pid, {})
-    nombre = info.get('nombre', '')
-
-    try:
-        with open(f'/proc/{pid}/cmdline', 'rb') as f:
-            cmdline = f.read().replace(b'\x00', b' ').decode(errors='ignore').strip()
-            if cmdline:
-                return cmdline
-    except (FileNotFoundError, PermissionError, ProcessLookupError):
-        pass
-
-    if nombre:
-        return nombre
-
-    try:
-        with open(f'/proc/{pid}/comm', 'r') as f:
-            return f.read().strip()
-    except (FileNotFoundError, PermissionError, ProcessLookupError):
-        return ''
-
-
-def _usuario_pid(pid):
-    try:
-        with open(f'/proc/{pid}/status', 'r') as f:
-            for linea in f:
-                if linea.startswith('Uid:'):
-                    uid = int(linea.split()[1])
-                    break
-            else:
-                return ''
-    except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
-        return ''
-
-    try:
-        import pwd
-        return pwd.getpwuid(uid).pw_name
-    except KeyError:
-        return str(uid)
+def _nombre_pid(info):
+    return info.get('cmdline') or info.get('nombre', '')
 
 
 def _marca_pid(pid, estado):

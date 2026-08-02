@@ -52,3 +52,52 @@ Por qué el handler tiene que ser mínimo: durante la interrupción, las estruct
 Cómo el self-pipe resuelve el problema: el handler solo hace os.write(pipe, byte) — operación async-signal-safe. El trabajo pesado (el dump, el reload) lo hace el loop principal fuera del contexto de señal. Handler y loop se comunican por el pipe; ninguno espera al otro.
 
 Async-signal-safe = función garantizada por POSIX de ser segura de llamar dentro de un handler de señal. La lista es corta: os.write, os.read, _exit, signal, algunas más. La mayoría de funciones de Python NO son async-signal-safe: print, open, json.dump, logging. Si un handler llama funciones no-seguras y la señal llega mientras el proceso ya está ejecutando esas mismas funciones (por ejemplo un print mientras hay otro print pendiente), pueden corromper estructuras internas o generar deadlocks. Por eso el patrón self-pipe: el handler solo usa os.write (seguro) para dejar un byte en un pipe; el loop principal lee del pipe en contexto normal y ejecuta el trabajo pesado sin restricciones.
+
+Race condition: Es un error donde el resultado correcto de un programa depende del orden relativo en que se intercalan operaciones sobre un recurso compartido, y ese orden no está garantizado por el lenguaje ni por el sistema operativo
+
+Doble try/except en leer_fds: hay dos race conditions TOCTOU distintas anidadas, y cada una requiere su propia protección:
+
+Externa (el proceso desaparece entre que se listó y se llamó leer_fds): si os.listdir('/proc/<pid>/fd') falla, devolvemos None para indicar "proceso no disponible".
+Interna (un FD puntual se cierra durante la iteración, con el proceso todavía vivo): si os.readlink falla para un FD específico, saltamos ese FD con continue y seguimos leyendo los demás.
+
+Sin la protección interna, un solo FD cerrado descartaría toda la lectura del proceso. Con ambas protecciones, la función es máximamente robusta a un /proc que se mueve mientras la leemos.
+
+listar_pids(): devuelve la lista de PIDs vivos filtrando las carpetas numéricas de /proc. Único punto de entrada del sistema al catálogo de procesos.
+
+leer_status(pid): lee /proc/<pid>/status, formato legible campo: valor. Devuelve dict con valores como strings. Trae máscaras de señales, memoria virtual con unidades, context switches. None si el proceso murió.
+
+leer_stat(pid): lee /proc/<pid>/stat, formato compacto de 52 campos separados por espacios. Requiere rfind(')') para saltar la trampa del nombre entre paréntesis. Devuelve dict con valores ya convertidos a int. Trae jiffies de CPU (utime/stime), page faults, política de scheduling.
+
+Cuándo usar cuál: status para datos legibles y máscaras; stat para métricas numéricas y CPU%.
+
+PID recycling — limitación conocida del TP:
+
+Linux recicla PIDs cuando un proceso muere y su número queda libre. Si entre listar_pids() y leer_stat(pid) un PID se recicla (muere el proceso original y nace otro con el mismo número), el TP leería datos válidos pero de un proceso distinto — silent data corruption, sin errores visibles.
+
+El TP no implementa protección contra esto porque requeriría capturar start_time (/proc/<pid>/stat campo 22) en dos momentos y comparar. Como el monitor es de observación pasiva (no toma decisiones automatizadas), la probabilidad baja y el costo alto justifican no implementarlo.
+
+Herramientas serias como htop sí lo implementan porque su superficie de exposición es mayor.
+
+
+calcular_cpu_pct — análisis de correctitud:
+
+No hay race conditions: el estado (historial_previo, historial_nuevo) es local al proceso analizador y no compartido. Sin embargo, es vulnerable a PID recycling: si entre dos vueltas del analizador un PID muere y se reasigna a otro proceso, el delta_jiffies puede ser negativo. El max(0.0, delta) enmascara el problema pero devuelve un CPU% erróneo (0% cuando el nuevo proceso sí usa CPU).
+
+Mitigación disponible pero no implementada: capturar start_time (/proc/<pid>/stat campo 22) junto con los jiffies, y descartar el historial si start_time cambió entre vueltas. No implementado por costo/beneficio en un monitor pasivo.
+
+
+CPU% se calcula como la velocidad de un auto:
+
+El campo utime + stime de /proc/<pid>/stat es un odómetro: te dice cuántos jiffies (unidad de tiempo del kernel, 1s = 100 jiffies) consumió el proceso desde que nació. Una sola lectura no te dice a qué "velocidad" está usando CPU ahora.
+
+Para saber la velocidad instantánea:
+
+Leés el odómetro en T1: jiffies_prev.
+Esperás un intervalo (delta_tiempo segundos).
+Leés el odómetro en T2: jiffies_actual.
+delta_jiffies = jiffies_actual - jiffies_prev.
+Convertís a segundos de CPU consumidos: delta_jiffies / CLK_TCK.
+Dividís por el tiempo real que pasó: (delta_jiffies / CLK_TCK) / delta_tiempo.
+Multiplicás por 100 para tener porcentaje.
+
+Por eso el analizador guarda un historial: necesita la lectura previa para restarla. La primera vuelta devuelve 0% porque no hay lectura previa para comparar.

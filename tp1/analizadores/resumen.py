@@ -14,7 +14,7 @@ import time
 # Agregamos el directorio padre al path para que Python encuentre procfs.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from procfs import listar_pids, leer_status, leer_stat, calcular_cpu_pct, resolver_usuario
+from procfs import listar_pids, leer_status, leer_stat, leer_cmdline, calcular_cpu_pct, resolver_usuario
 
 
 def analizador_resumen(snapshot, intervalo):
@@ -43,6 +43,7 @@ def analizador_resumen(snapshot, intervalo):
 
             datos[pid] = {
                 'nombre': info.get('Name', ''),
+                'cmdline': leer_cmdline(pid),
                 'estado': info.get('State', ''),
                 'ppid': int(info.get('PPid', 0)),
                 'uid': uid,

@@ -84,6 +84,20 @@ def leer_stat(pid):
     
     }
     return datos
+def leer_cmdline(pid):
+    """
+    Lee /proc/<pid>/cmdline y devuelve la línea de comando completa
+    (el kernel separa los argumentos con bytes NUL; acá los unimos con espacios).
+    Devuelve '' si el proceso no tiene cmdline (ej. kernel threads) o ya no existe.
+    """
+    try:
+        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            crudo = f.read()
+    except FileNotFoundError:
+        return ''
+    return crudo.replace(b'\x00', b' ').decode(errors='ignore').strip()
+
+
 def leer_meminfo():
     """
     Lee /proc/meminfo y devuelve un dict con los campos parseados.

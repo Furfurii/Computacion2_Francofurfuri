@@ -21,7 +21,7 @@ memoria.
 ```
 python3 main.py
 # o, dentro de Docker:
-docker compose up --build
+docker compose run --build --rm monitor
 ```
 
 | Tecla | Acción |
@@ -218,12 +218,20 @@ compartido con el analizador correspondiente.
 ### Con Docker (recomendado)
 
 ```bash
-docker compose up --build
+docker compose run --build --rm monitor
 ```
+
+**Importante:** no uses `docker compose up` para esto — `up` está pensado para levantar
+servicios en background y multiplexa la salida de todos los contenedores con un prefijo
+(`monitor-1  | ...`), sin pegar el stdin real de tu terminal al contenedor. `tty: true` +
+`stdin_open: true` en el `docker-compose.yml` solo le dejan un pty abierto *adentro* del
+contenedor; no alcanza para que la TUI reciba tus teclas. `docker compose run` en cambio crea
+un contenedor ad-hoc pegado directamente a tu terminal (como `docker run -it`), que es lo que
+esta app necesita para leer teclado y dibujar con `rich.Live`. `--rm` lo borra al salir y
+`--build` reconstruye la imagen si el código cambió.
 
 El `docker-compose.yml` monta `/proc` del host como solo lectura (`/proc:/proc:ro`) y usa
 `pid: host`, así el monitor ve los procesos reales de la máquina y no solo los del contenedor.
-`tty: true` + `stdin_open: true` habilitan la TUI interactiva.
 
 ### Local (sin Docker)
 
