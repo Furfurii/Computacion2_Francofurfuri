@@ -1,0 +1,121 @@
+{
+  "fecha": "2026-11-02T22:08:35",
+  "api": "http://localhost:8000",
+  "workers": 4,
+  "esperar": [
+    {
+      "k": 1,
+      "total": 0.9998760223388672,
+      "espera_cola_prom": 0.0002779960632324219,
+      "duracion_prom": 0.999598,
+      "duracion_max": 0.999598,
+      "throughput": 1.000123993033499
+    },
+    {
+      "k": 2,
+      "total": 1.0106701850891113,
+      "espera_cola_prom": 0.0011761188507080078,
+      "duracion_prom": 1.0013225000000001,
+      "duracion_max": 1.001494,
+      "throughput": 1.978884931510727
+    },
+    {
+      "k": 4,
+      "total": 1.0237209796905518,
+      "espera_cola_prom": 0.0012203454971313477,
+      "duracion_prom": 1.00083375,
+      "duracion_max": 1.001827,
+      "throughput": 3.907314668113094
+    },
+    {
+      "k": 8,
+      "total": 2.0126428604125977,
+      "espera_cola_prom": 0.49523165822029114,
+      "duracion_prom": 1.000884625,
+      "duracion_max": 1.001454,
+      "throughput": 3.974873117011916
+    },
+    {
+      "k": 16,
+      "total": 4.0121119022369385,
+      "espera_cola_prom": 1.4893773794174194,
+      "duracion_prom": 1.0005836875,
+      "duracion_max": 1.001224,
+      "throughput": 3.9879246615926287
+    },
+    {
+      "k": 32,
+      "total": 8.015160083770752,
+      "espera_cola_prom": 3.479331284761429,
+      "duracion_prom": 1.000685875,
+      "duracion_max": 1.001918,
+      "throughput": 3.992434295204435
+    },
+    {
+      "k": 64,
+      "total": 16.032023191452026,
+      "espera_cola_prom": 7.454411420971155,
+      "duracion_prom": 1.000769875,
+      "duracion_max": 1.002146,
+      "throughput": 3.992010193331282
+    }
+  ],
+  "hashear": [
+    {
+      "k": 1,
+      "total": 0.7015438079833984,
+      "espera_cola_prom": 0.001024007797241211,
+      "duracion_prom": 0.70052,
+      "duracion_max": 0.70052,
+      "throughput": 1.4254277332651824
+    },
+    {
+      "k": 2,
+      "total": 0.6771421432495117,
+      "espera_cola_prom": 0.0012044906616210938,
+      "duracion_prom": 0.6643485,
+      "duracion_max": 0.675676,
+      "throughput": 2.953589611779701
+    },
+    {
+      "k": 4,
+      "total": 0.7125937938690186,
+      "espera_cola_prom": 0.0008402466773986816,
+      "duracion_prom": 0.6958012499999999,
+      "duracion_max": 0.702073,
+      "throughput": 5.613296150506803
+    },
+    {
+      "k": 8,
+      "total": 1.4304249286651611,
+      "espera_cola_prom": 0.3414452373981476,
+      "duracion_prom": 0.697473875,
+      "duracion_max": 0.718486,
+      "throughput": 5.59274369432684
+    },
+    {
+      "k": 16,
+      "total": 2.900006055831909,
+      "espera_cola_prom": 1.0567709803581238,
+      "duracion_prom": 0.7097773125,
+      "duracion_max": 0.749349,
+      "throughput": 5.517229858132199
+    },
+    {
+      "k": 32,
+      "total": 5.967334032058716,
+      "espera_cola_prom": 2.5219034627079964,
+      "duracion_prom": 0.73577859375,
+      "duracion_max": 0.803268,
+      "throughput": 5.362528698424492
+    },
+    {
+      "k": 64,
+      "total": 12.277630090713501,
+      "espera_cola_prom": 5.59211053326726,
+      "duracion_prom": 0.758483546875,
+      "duracion_max": 0.854202,
+      "throughput": 5.21273238622884
+    }
+  ]
+}

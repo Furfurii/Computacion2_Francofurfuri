@@ -1,0 +1,30 @@
+services:
+  api:
+    build: .
+    container_name: tp2-tareas
+    # Corre con el uid/gid del usuario del host (1000 por defecto) para que
+    # los JSON volcados en ./datos no queden con dueño root.
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      - "8000:8000"          # la API queda accesible desde el host
+    environment:
+      # ${VAR:-default}: se puede cambiar sin editar el archivo, ej:
+      #   N_WORKERS=64 docker compose up -d
+      N_WORKERS: "${N_WORKERS:-4}"   # corrutinas consumidoras de la cola
+      N_PROCESOS: "0"        # procesos para CPU-bound (0 = cantidad de núcleos)
+      TIMEOUT_DEFAULT: "60"  # timeout por tarea si no se especifica
+      TIMEOUT_APAGADO: "10"  # cuánto se espera a las tareas en curso al apagar
+      DIR_ESTADO: "/app/datos"
+    volumes:
+      # Los estado_<timestamp>.json quedan en ./datos del host y sobreviven
+      # a que el contenedor se borre (así el próximo arranque los reporta).
+      - ./datos:/app/datos
+    # Docker manda SIGTERM y, si el proceso no salió en este lapso, SIGKILL.
+    # Tiene que ser mayor que TIMEOUT_APAGADO + el tiempo del volcado.
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/estadisticas')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3

@@ -1,0 +1,5 @@
+venv/
+__pycache__/
+datos/*
+!datos/.gitkeep
+*.json.tmp
